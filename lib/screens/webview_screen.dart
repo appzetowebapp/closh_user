@@ -652,7 +652,7 @@ class _WebViewScreenState extends State<WebViewScreen> {
             var isLogin = urlString.includes('/auth/login') || 
                           urlString.includes('/users/login') ||
                           urlString.includes('/auth/signup-verify') ||
-                          urlString.includes('/auth/verify-otp');
+                          urlString.includes('/user/auth/verify-otp');
             
             // Call original fetch
             try {
@@ -695,7 +695,7 @@ class _WebViewScreenState extends State<WebViewScreen> {
             if (url && (url.includes('/auth/login') || 
                         url.includes('/users/login') ||
                         url.includes('/auth/signup-verify') ||
-                        url.includes('/auth/verify-otp'))) {
+                        url.includes('/user/auth/verify-otp'))) {
                this.addEventListener('load', function() {
                   try {
                     var responseBody = self.responseText;
@@ -1282,6 +1282,7 @@ class _WebViewScreenState extends State<WebViewScreen> {
                         allowUniversalAccessFromFileURLs: true,
                         useOnLoadResource: true,
                         useShouldOverrideUrlLoading: true,
+                       
                       ),
                       onCreateWindow: (controller, createWindowRequest) async {
                         final urlRequest = createWindowRequest.request;
@@ -1582,6 +1583,8 @@ class _WebViewScreenState extends State<WebViewScreen> {
                             return {'success': false};
                           },
                         );
+
+                       
 
                         // Add JavaScript handler to receive phone number from website
                         controller.addJavaScriptHandler(

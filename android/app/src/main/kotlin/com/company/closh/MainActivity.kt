@@ -1,4 +1,4 @@
-package com.ziggybites.user
+package com.company.closh1
 
 import android.Manifest
 import android.content.pm.PackageManager
