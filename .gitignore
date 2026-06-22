@@ -64,7 +64,7 @@ unlinked_spec.ds
 **/ios/**/*.pbxuser
 **/ios/**/*.perspectivev3
 **/ios/**/*sync/
-**/ios/**/.sconsign.dblite
+**/ios/**/.sconsign.dblite 
 **/ios/**/.tags*
 **/ios/**/.vagrant/
 **/ios/**/DerivedData/
