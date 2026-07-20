@@ -1,8 +1,10 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
 
 import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:dio/dio.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
@@ -21,6 +23,7 @@ import 'package:webview_master_app/utils/prefs_util.dart';
 import 'package:webview_master_app/utils/status_bar_util.dart';
 import 'package:webview_master_app/widgets/exit_dialog.dart';
 import 'package:webview_master_app/widgets/offline_screen.dart';
+import 'package:webview_master_app/screens/pdf_viewer_screen.dart';
 
 /// WebView Screen - Main screen that loads the configured web URL
 class WebViewScreen extends StatefulWidget {
@@ -509,6 +512,137 @@ class _WebViewScreenState extends State<WebViewScreen> {
           ),
         );
       }
+    }
+  }
+
+  Future<bool> _handlePotentialDownloadOrPdf(String url) async {
+    try {
+      debugPrint('🔍 Checking if URL is a PDF or download: $url');
+      
+      // Get cookies from CookieManager
+      final cookieManager = CookieManager.instance();
+      final cookies = await cookieManager.getCookies(url: WebUri(url));
+      final cookieHeader = cookies.map((c) => '${c.name}=${c.value}').join('; ');
+
+      // Also get access token from PrefsUtil just in case
+      final accessToken = PrefsUtil.getAccessToken();
+      final headers = <String, String>{
+        if (cookieHeader.isNotEmpty) 'Cookie': cookieHeader,
+        if (accessToken != null && accessToken.isNotEmpty) 'Authorization': 'Bearer $accessToken',
+        'User-Agent': 'Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36',
+      };
+
+      // Make a HEAD request
+      final dio = Dio();
+      final headResponse = await dio.head(
+        url,
+        options: Options(
+          headers: headers,
+          followRedirects: true,
+          validateStatus: (status) => status != null && status < 500,
+        ),
+      );
+
+      final finalUrl = headResponse.realUri.toString();
+      debugPrint('📍 Final redirected URL: $finalUrl');
+      
+      final contentType = headResponse.headers.value('content-type') ?? '';
+      debugPrint('📋 Content-Type: $contentType');
+      
+      final contentDisposition = headResponse.headers.value('content-disposition');
+      debugPrint('📋 Content-Disposition: $contentDisposition');
+      debugPrint('🔗 Download URL: $url');
+
+      final isPdf = contentType.toLowerCase().contains('application/pdf') || finalUrl.toLowerCase().endsWith('.pdf');
+      final isAttachment = contentDisposition?.toLowerCase().contains('attachment') == true;
+      final isInvoiceRoute = finalUrl.toLowerCase().contains('invoice') || finalUrl.toLowerCase().contains('receipt');
+
+      if (isPdf || isAttachment || (isInvoiceRoute && contentType.toLowerCase().contains('application/'))) {
+        debugPrint('✅ Detected PDF or Download. Starting native download process...');
+        
+        // Show download UI
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Downloading file...'),
+              backgroundColor: Colors.blue,
+              duration: Duration(seconds: 2),
+            ),
+          );
+        }
+
+        final downloadService = DownloadService();
+        final result = await downloadService.downloadFile(
+          url: url, // use original url so headers apply
+          contentDisposition: contentDisposition,
+          context: context,
+          headers: headers,
+          usePublicDownloads: true, // Try to save to public downloads
+        );
+
+        if (result.success && result.filePath != null) {
+          debugPrint('✅ Download successful: ${result.filePath}');
+          
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('File saved: ${result.filename}'),
+                backgroundColor: Colors.green,
+                duration: const Duration(seconds: 4),
+                action: SnackBarAction(
+                  label: 'OPEN',
+                  textColor: Colors.white,
+                  onPressed: () async {
+                    if (isPdf) {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (context) => PdfViewerScreen(
+                            filePath: result.filePath!,
+                            title: result.filename ?? 'Invoice',
+                            originalUrl: url,
+                          ),
+                        ),
+                      );
+                    } else {
+                      await downloadService.openFile(result.filePath!);
+                    }
+                  },
+                ),
+              ),
+            );
+          }
+          
+          // Open automatically if it's a PDF
+          if (isPdf && mounted) {
+            Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (context) => PdfViewerScreen(
+                  filePath: result.filePath!,
+                  title: result.filename ?? 'Invoice',
+                  originalUrl: url,
+                ),
+              ),
+            );
+          }
+        } else {
+          debugPrint('❌ Download failed: ${result.error}');
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('Download failed: ${result.error}'),
+                backgroundColor: Colors.red,
+              ),
+            );
+          }
+        }
+        return true; // We handled it
+      }
+      return false; // Not a PDF or download, proceed normally
+    } catch (e) {
+      debugPrint('❌ Error checking URL for PDF/Download: $e');
+      return false;
     }
   }
 
@@ -1264,7 +1398,8 @@ class _WebViewScreenState extends State<WebViewScreen> {
                         userAgent:
                             'Mozilla/5.0 (Linux; Android 13; Pixel 7 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36',
                         javaScriptEnabled: true,
-                        javaScriptCanOpenWindowsAutomatically: false,
+                        javaScriptCanOpenWindowsAutomatically: true,
+                        supportMultipleWindows: true,
                         domStorageEnabled: true,
                         databaseEnabled: true,
                         mediaPlaybackRequiresUserGesture: false,
@@ -1282,63 +1417,239 @@ class _WebViewScreenState extends State<WebViewScreen> {
                         allowUniversalAccessFromFileURLs: true,
                         useOnLoadResource: true,
                         useShouldOverrideUrlLoading: true,
-                       
                       ),
                       onCreateWindow: (controller, createWindowRequest) async {
                         final urlRequest = createWindowRequest.request;
                         var url = urlRequest.url;
                         debugPrint('🪟 onCreateWindow: url=$url');
 
-                        if (url == null) return false;
-
-                        // Check for Razorpay UPI app SVG URLs FIRST
-                        // Use stricter check that handles query params
-                        if (url.host.contains('razorpay.com') &&
-                            url.toString().contains('/app/') &&
-                            (url.path.endsWith('.svg') ||
-                                url.toString().contains('.svg'))) {
-                          debugPrint(
-                              '💳 onCreateWindow: Detected Razorpay UPI app SVG, intercepting...');
-                          final upiAppUri =
-                              await _handleRazorpayUPIAppClick(url);
-                          if (upiAppUri != null) {
-                            await _launchExternalUrl(upiAppUri);
+                        // Check if we can intercept right away (if URL is provided)
+                        if (url != null) {
+                          final urlStrForPdf = url.toString().toLowerCase();
+                          if (urlStrForPdf.endsWith('.pdf') || 
+                              urlStrForPdf.contains('.pdf?') ||
+                              urlStrForPdf.contains('invoice') || 
+                              urlStrForPdf.contains('receipt') || 
+                              urlStrForPdf.contains('download')) {
+                            if (await _handlePotentialDownloadOrPdf(url.toString())) {
+                              return false; 
+                            }
+                          }
+                          
+                          if (_shouldLaunchExternally(url)) {
+                            await _launchExternalUrl(url);
                             return false;
                           }
                         }
 
-                        // Handle non-HTTP schemes
-                        final allowedSchemes = [
-                          'http',
-                          'https',
-                          'file',
-                          'chrome',
-                          'data',
-                          'javascript'
-                        ];
-                        if (!allowedSchemes
-                            .contains(url.scheme.toLowerCase())) {
-                          if (await canLaunchUrl(url)) {
-                            await launchUrl(url,
-                                mode: LaunchMode.externalApplication);
-                            return false;
-                          }
-                        }
+                        if (!mounted) return false;
+                        
+                        showDialog(
+                          context: context,
+                          barrierDismissible: true,
+                          builder: (context) {
+                            InAppWebViewController? popupWebViewController;
+                            bool isDownloading = false;
+                            String? detectedPdfUrl;
 
-                        if (_shouldLaunchExternally(url)) {
-                          await _launchExternalUrl(url);
-                          return false;
-                        }
+                            return StatefulBuilder(
+                              builder: (context, setStateDialog) {
+                                return AlertDialog(
+                                  contentPadding: EdgeInsets.zero,
+                                  insetPadding: const EdgeInsets.all(20),
+                                  content: SizedBox(
+                                    width: MediaQuery.of(context).size.width,
+                                    height: MediaQuery.of(context).size.height * 0.8,
+                                    child: Column(
+                                      children: [
+                                        Row(
+                                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                          children: [
+                                            Padding(
+                                              padding: const EdgeInsets.only(left: 16.0),
+                                              child: Text('Document Viewer', style: const TextStyle(fontWeight: FontWeight.bold)),
+                                            ),
+                                            Row(
+                                              children: [
+                                                if (isDownloading)
+                                                  const Padding(
+                                                    padding: EdgeInsets.symmetric(horizontal: 16.0),
+                                                    child: SizedBox(
+                                                      width: 20, height: 20, 
+                                                      child: CircularProgressIndicator(strokeWidth: 2)
+                                                    ),
+                                                  )
+                                                else
+                                                  IconButton(
+                                                    icon: const Icon(Icons.download),
+                                                    tooltip: 'Download',
+                                                    onPressed: () async {
+                                                      if (popupWebViewController == null) return;
+                                                      
+                                                      setStateDialog(() { isDownloading = true; });
+                                                      
+                                                      try {
+                                                        String urlStr = detectedPdfUrl ?? await popupWebViewController!.getUrl().then((u) => u?.toString()) ?? 'about:blank';
+                                                        if (urlStr.isEmpty) urlStr = 'about:blank';
+                                                        
+                                                        final downloadService = DownloadService();
+                                                        await downloadService.requestStoragePermission(requirePublicAccess: false);
+                                                        
+                                                        String? finalPath;
 
-                        controller.loadUrl(urlRequest: urlRequest);
-                        return true;
+                                                        if (detectedPdfUrl == null || detectedPdfUrl!.isEmpty) {
+                                                          // 🌟 THE MAGIC: The website is purely HTML that prints. Export the view natively!
+                                                          debugPrint('📸 Opening native print dialog for HTML view...');
+                                                          await popupWebViewController!.printCurrentPage();
+                                                          finalPath = 'Print Dialog Opened';
+                                                        } else {
+                                                          // We intercepted a real PDF URL
+                                                          String urlStr = detectedPdfUrl!;
+                                                          final cookieManager = CookieManager.instance();
+                                                          final cookies = await cookieManager.getCookies(url: WebUri(urlStr));
+                                                          final cookieHeader = cookies.map((c) => '${c.name}=${c.value}').join('; ');
+                                                          
+                                                          final result = await downloadService.downloadFile(
+                                                            url: urlStr,
+                                                            context: context,
+                                                            usePublicDownloads: false,
+                                                            headers: {
+                                                              if (cookieHeader.isNotEmpty) 'Cookie': cookieHeader,
+                                                              'User-Agent': 'Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36',
+                                                            },
+                                                          );
+                                                          if (!result.success) throw Exception(result.error);
+                                                          finalPath = result.filePath;
+                                                          if (Platform.isAndroid && finalPath != null) {
+                                                            await downloadService.addFileToMediaStore(finalPath, 'Document_${DateTime.now().millisecondsSinceEpoch}.pdf', 'application/pdf');
+                                                          }
+                                                        }
 
-                        // ✅ REGISTER FILE CHOOSER HERE (v6.1.5)
-
-                        debugPrint(
-                            '✅ WebView created & file chooser registered');
+                                                        if (mounted && finalPath != null) {
+                                                          if (finalPath == 'Print Dialog Opened') {
+                                                            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                                                              content: Text('Please select "Save as PDF" to download the invoice.'),
+                                                              backgroundColor: Colors.blue,
+                                                            ));
+                                                          } else {
+                                                            ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                                                              content: Text('✅ Saved to Downloads: ${finalPath.split('/').last}'),
+                                                              backgroundColor: Colors.green,
+                                                              action: SnackBarAction(
+                                                                label: 'OPEN',
+                                                                textColor: Colors.white,
+                                                                onPressed: () {
+                                                                  downloadService.openFile(finalPath!);
+                                                                }),
+                                                            ));
+                                                          }
+                                                        }
+                                                      } catch (e, stackTrace) {
+                                                        debugPrint('❌ PDF Generation / Download Error: $e');
+                                                        debugPrint('❌ StackTrace: $stackTrace');
+                                                        if (mounted) {
+                                                          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                                                            content: Text('Download failed: $e'),
+                                                            backgroundColor: Colors.red,
+                                                          ));
+                                                        }
+                                                      } finally {
+                                                        setStateDialog(() { isDownloading = false; });
+                                                      }
+                                                    },
+                                                  ),
+                                                IconButton(
+                                                  icon: const Icon(Icons.close),
+                                                  onPressed: () {
+                                                    Navigator.pop(context);
+                                                  },
+                                                ),
+                                              ],
+                                            ),
+                                          ],
+                                        ),
+                                        Expanded(
+                                          child: InAppWebView(
+                                            windowId: createWindowRequest.windowId,
+                                        initialUserScripts: UnmodifiableListView<UserScript>([
+                                          UserScript(
+                                            source: "window.print = function() { console.log('Print blocked to allow native PDF export'); };",
+                                            injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
+                                          )
+                                        ]),
+                                        initialSettings: InAppWebViewSettings(
+                                          javaScriptEnabled: true,
+                                          useShouldOverrideUrlLoading: true,
+                                          useOnDownloadStart: true,
+                                          javaScriptCanOpenWindowsAutomatically: true,
+                                          supportMultipleWindows: true,
+                                          allowFileAccess: true,
+                                          useShouldInterceptRequest: true,
+                                        ),
+                                        onWebViewCreated: (popupController) {
+                                          debugPrint('✅ Popup WebView created');
+                                          popupWebViewController = popupController;
+                                        },
+                                        onConsoleMessage: (controller, consoleMessage) {
+                                          debugPrint('🪟 POPUP JS: ${consoleMessage.message}');
+                                        },
+                                        onCloseWindow: (popupController) {
+                                          debugPrint('🪟 Popup requested to close');
+                                          if (Navigator.canPop(context)) {
+                                            Navigator.pop(context);
+                                          }
+                                        },
+                                        shouldInterceptRequest: (controller, request) async {
+                                          final urlStr = request.url.toString();
+                                          debugPrint('🌐 Intercepted ANY request: $urlStr');
+                                          if (urlStr.toLowerCase().contains('.pdf') || 
+                                              urlStr.toLowerCase().contains('invoice') || 
+                                              urlStr.toLowerCase().contains('receipt') || 
+                                              urlStr.toLowerCase().contains('download')) {
+                                            detectedPdfUrl = urlStr;
+                                            debugPrint('🔍 Intercepted PDF request: $urlStr');
+                                          }
+                                          return null;
+                                        },
+                                        shouldOverrideUrlLoading: (popupController, navigationAction) async {
+                                          final popupUrl = navigationAction.request.url;
+                                          if (popupUrl != null) {
+                                            debugPrint('➡️ Popup Navigating: $popupUrl');
+                                            
+                                            final urlStrForPdf = popupUrl.toString().toLowerCase();
+                                            if (urlStrForPdf.endsWith('.pdf') || 
+                                                urlStrForPdf.contains('.pdf?') ||
+                                                urlStrForPdf.contains('invoice') || 
+                                                urlStrForPdf.contains('receipt') || 
+                                                urlStrForPdf.contains('download')) {
+                                              if (await _handlePotentialDownloadOrPdf(popupUrl.toString())) {
+                                                if (Navigator.canPop(context)) {
+                                                  Navigator.pop(context);
+                                                }
+                                                return NavigationActionPolicy.CANCEL;
+                                              }
+                                            }
+                                            
+                                            if (_shouldLaunchExternally(popupUrl)) {
+                                              await _launchExternalUrl(popupUrl);
+                                              return NavigationActionPolicy.CANCEL;
+                                            }
+                                          }
+                                          return NavigationActionPolicy.ALLOW;
+                                        },
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            );
+                          },
+                        );
                       },
-                      shouldOverrideUrlLoading:
+                    );
+                    return true;
+                  },
+                  shouldOverrideUrlLoading:
                           (controller, navigationAction) async {
                         final urlRequest = navigationAction.request;
                         final uri = urlRequest.url;
@@ -1346,6 +1657,18 @@ class _WebViewScreenState extends State<WebViewScreen> {
                         if (uri == null) return NavigationActionPolicy.ALLOW;
 
                         debugPrint('➡️ Navigating: $uri');
+
+                        // Check if it's a PDF or download (like invoice/receipt)
+                        final urlStrForPdf = uri.toString().toLowerCase();
+                        if (urlStrForPdf.endsWith('.pdf') || 
+                            urlStrForPdf.contains('.pdf?') ||
+                            urlStrForPdf.contains('invoice') || 
+                            urlStrForPdf.contains('receipt') || 
+                            urlStrForPdf.contains('download')) {
+                          if (await _handlePotentialDownloadOrPdf(uri.toString())) {
+                            return NavigationActionPolicy.CANCEL; // Cancel navigation as we handled it
+                          }
+                        }
 
                         // 1. Check for Intent Scheme (Android)
                         if (uri.scheme.toLowerCase() == 'intent') {
